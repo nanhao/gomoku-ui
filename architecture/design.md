@@ -59,13 +59,15 @@ gomoku_ui/config.py is used by the entry script and by the controller.
 | Class | File | Responsibility |
 | --- | --- | --- |
 | `UiConfig` | `config.py` | Resolve side, engine URL and Redis URL from CLI arguments, environment variables and defaults, in that order |
-| `GameSnapshot` | `models/game_snapshot.py` | Immutable decoded `SavedGame`: board, move history, `current_player`, `winner` |
+| `GameSnapshot` | `models/game_snapshot.py` | Immutable decoded `SavedGame`: nested `config` and `state` (board, `current_player`, `winner`) plus the move history |
+| `MakeMoveRequest` | `models/make_move_request.py` | Request body of `POST /moves`: 1-based `row` and `col` |
 | `MoveRecord` | `models/move_record.py` | One played move: 1-based `row`, `col`, `player` |
 | `MoveEvent` | `models/move_event.py` | Immutable decoded pub/sub payload: `move_number`, coordinates, players, `winner`, `game_over` |
 | `EngineApiClient` | `services/engine_api_client.py` | `get_game()` and `make_move()` over HTTP with timeouts; converts non-2xx responses into `EngineApiError` |
 | `MoveEventSubscriber` | `services/move_event_subscriber.py` | Dedicated thread: subscribe, confirm, decode events, report connection status, reconnect with backoff |
 | `SubscriberStatus` | `services/subscriber_status.py` | Connection state reported to the controller: connecting, live, paused |
 | `ClientGame` | `game/client_game.py` | Holds the snapshot and the chosen side; applies/deduplicates events; answers `is_my_turn`, `cell_at`, `last_move`, `is_game_over`; UX pre-checks |
+| `EventOutcome` | `game/event_outcome.py` | Result of `apply_event`: applied, ignored, or gap (resync needed) |
 | `GameView` | `game/game_view.py` | Abstract boundary the controller talks to: render snapshot, status, error, input enablement |
 | `GameController` | `game/game_controller.py` | Startup sequence, background HTTP tasks, queue draining, resync, shutdown |
 | `MainWindow` / `BoardView` / `DpiScaler` | `ui/` | Tkinter implementation of `GameView`: frame layout, canvas rendering, click mapping, per-monitor DPI awareness |
@@ -88,13 +90,16 @@ Three kinds of threads exist:
 
 Cross-thread communication uses `queue.Queue` only:
 
-- `event_queue: Queue[MoveEvent]`
-- `snapshot_queue: Queue[GameSnapshot | EngineApiError]`
-- `status_queue: Queue[SubscriberStatus]`
+- `MoveEventSubscriber.events: Queue[MoveEvent]` (owned by the subscriber)
+- `MoveEventSubscriber.statuses: Queue[SubscriberStatus]` (owned by the subscriber)
+- `GameController.snapshot_queue: Queue[GameSnapshot | EngineApiError]` for GET results
+- `GameController.move_result_queue: Queue[GameSnapshot | EngineApiError]` for POST results
 
-Worker threads never call view methods. The UI thread drains the queues on a
-short timer and updates the view. This is what makes the design portable to any
-toolkit.
+POST results are kept apart from GET results so a snapshot that arrives while a
+move is still in flight cannot re-enable the board underneath that pending
+move. Worker threads never call view methods. The UI thread drains the queues
+on a short timer and updates the view. This is what makes the design portable
+to any toolkit.
 
 ## 5. Startup Sequence
 
@@ -103,8 +108,9 @@ toolkit.
 2. Controller starts the subscriber immediately, then submits the initial `GET`
    without waiting for Redis. Events that arrive before the snapshot are queued,
    not applied.
-3. On each UI tick, the controller drains the **snapshot queue first**, then the
-   **event queue**.
+3. On each UI tick, the controller drains the **snapshot queue first**, then
+   the **POST result queue**, the **status queue**, and finally the **event
+   queue**.
 4. Once the snapshot is installed, queued events are processed by
    `ClientGame.apply_event()`:
    - `move_number <= applied moves` → ignore (already reflected, or own echo),
@@ -214,12 +220,12 @@ Terminal conditions:
   dependency with LGPLv3 obligations, pygame-ce because it ships no widgets.
   See README "GUI Toolkit Selection" for the comparison and the trigger to
   revisit.
-- **Manual refresh affordance.** A refresh action (button or shortcut) is
-  cheap and useful when Redis is unavailable; add it as a `ttk` button plus a
-  keyboard shortcut when the view is written.
-- **Visual polish.** Last-move marker, hover preview, numbered moves and
-  animations are optional; all four are `Canvas` items and can be added without
-  touching the controller.
+- **Manual refresh affordance — resolved.** A `Refresh (F5)` `ttk` button and
+  the F5 shortcut call `GameController.request_refresh()`, which resubmits the
+  GET. It is the last resort when Redis is unavailable.
+- **Visual polish.** The last-move marker and the hover preview are
+  implemented as `Canvas` items. Numbered moves and animations remain optional
+  and would need no controller change.
 - **Spectator mode.** Not required; the same client with no side could observe
   read-only later.
 
