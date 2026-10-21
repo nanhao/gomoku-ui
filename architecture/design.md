@@ -19,7 +19,8 @@ Constraints:
   comes over HTTP and Redis.
 - The engine API has no authentication, so the chosen side is enforced locally
   only.
-- The GUI toolkit is not selected yet. Everything outside `gomoku_ui/ui` must be
+- The GUI toolkit is Tkinter (`tkinter` + `tkinter.ttk`, standard library; see
+  README "GUI Toolkit Selection"). Everything outside `gomoku_ui/ui` must stay
   toolkit-agnostic.
 
 ## 2. Layering
@@ -67,7 +68,7 @@ gomoku_ui/config.py is used by the entry script and by the controller.
 | `ClientGame` | `game/client_game.py` | Holds the snapshot and the chosen side; applies/deduplicates events; answers `is_my_turn`, `cell_at`, `last_move`, `is_game_over`; UX pre-checks |
 | `GameView` | `game/game_view.py` | Abstract boundary the controller talks to: render snapshot, status, error, input enablement |
 | `GameController` | `game/game_controller.py` | Startup sequence, background HTTP tasks, queue draining, resync, shutdown |
-| `MainWindow` / `BoardView` | `ui/` | Toolkit-specific implementation of `GameView` (to be written after toolkit research) |
+| `MainWindow` / `BoardView` / `DpiScaler` | `ui/` | Tkinter implementation of `GameView`: frame layout, canvas rendering, click mapping, per-monitor DPI awareness |
 | `play_game.py` | `scripts/` | Argument parsing and process entry; the only module allowed global `main` code |
 
 One class per module. Exception classes get their own modules as well (for
@@ -200,20 +201,25 @@ Terminal conditions:
   success/failure, resync on gap and on Redis reconnection, shutdown idempotency.
   The engine client, subscriber and view are replaced by fakes; no live Redis or
   engine is needed.
-- UI widget tests wait until a toolkit is chosen. Until then `GameView` is a
-  no-op fake in controller tests.
+- UI widget tests are not part of the strategy. `GameView` is a no-op fake in
+  controller tests, and board geometry (click → cell) is written as a pure
+  function in the view so it can be tested without opening a window.
 - No test writes to the engine's `save/` directory.
 
-## 11. Open Decisions
+## 11. Decisions and Open Questions
 
-- **GUI toolkit.** Deferred to a dedicated research step. Criteria: Windows
-  support without heavy dependencies, reliable board canvas and hit-testing,
-  high-DPI behaviour, timer-based queue polling, and testability. Tkinter is the
-  zero-dependency baseline; PySide6 and Pygame are alternatives.
+- **GUI toolkit — resolved: Tkinter** (`tkinter` + `tkinter.ttk`). Chosen for the
+  zero install footprint, a canvas that covers the board, and a contained
+  high-DPI workaround; PySide6 was rejected as a several-hundred-megabyte
+  dependency with LGPLv3 obligations, pygame-ce because it ships no widgets.
+  See README "GUI Toolkit Selection" for the comparison and the trigger to
+  revisit.
 - **Manual refresh affordance.** A refresh action (button or shortcut) is
-  cheap and useful when Redis is unavailable; decide together with the toolkit.
+  cheap and useful when Redis is unavailable; add it as a `ttk` button plus a
+  keyboard shortcut when the view is written.
 - **Visual polish.** Last-move marker, hover preview, numbered moves and
-  animations are optional and toolkit-dependent.
+  animations are optional; all four are `Canvas` items and can be added without
+  touching the controller.
 - **Spectator mode.** Not required; the same client with no side could observe
   read-only later.
 
@@ -227,6 +233,9 @@ Terminal conditions:
 - **Two channels.** HTTP responses and pub/sub events can arrive in any order;
   the `move_number` rules and stale-snapshot rejection are mandatory, not
   defensive extras.
+- **Tk 8.6 high-DPI.** Tk does not declare DPI awareness by itself, so the board
+  view has to opt in before the root window exists. Moving that call later
+  silently brings back bitmap-stretched text and a mis-scaled board.
 - **Engine compatibility.** The client mirrors the engine's wire formats. If the
   engine changes `SavedGame` or `MoveEvent`, `models` must be updated together
   with the README contract tables.
