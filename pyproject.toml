@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gomoku-ui"
+version = "0.1.0"
+description = "Desktop client for gomoku-engine: load an existing game and play one side on a graphical board"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # REST calls to gomoku-engine.
+    "httpx>=0.27",
+    # Pinned below 6: redis-py 6+ requires Redis >= 6.0 (HELLO handshake),
+    # while Redis-on-Windows ships 3.0.x, matching gomoku-engine's pin.
+    "redis>=5.0,<6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["gomoku_ui*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
