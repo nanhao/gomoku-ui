@@ -167,8 +167,7 @@ new dependency: `tkinter` ships with CPython.
 
 ## Directory Layout
 
-Target layout (this scaffold contains the package directories and documentation;
-the modules below are implemented in following steps):
+Target layout (all modules below are implemented):
 
 ```text
 gomoku-ui/
@@ -183,6 +182,7 @@ gomoku-ui/
 │   │   ├── config.py                # UiConfig: resolved endpoints and side
 │   │   ├── models/                  # DTOs mirroring the engine wire formats
 │   │   │   ├── game_snapshot.py     # GameSnapshot: decoded GET response
+│   │   │   ├── make_move_request.py # MakeMoveRequest: POST /moves body
 │   │   │   ├── move_record.py       # MoveRecord: one played move
 │   │   │   └── move_event.py        # MoveEvent: decoded pub/sub payload
 │   │   ├── services/                # I/O boundaries
@@ -193,6 +193,7 @@ gomoku-ui/
 │   │   │   └── subscriber_status.py # connecting / live / paused
 │   │   ├── game/                    # toolkit-agnostic client state
 │   │   │   ├── client_game.py       # board + side + event reconciliation
+│   │   │   ├── event_outcome.py     # applied / ignored / gap result
 │   │   │   ├── game_view.py         # abstract boundary the controller drives
 │   │   │   └── game_controller.py   # orchestrates API, subscriber and view
 │   │   └── ui/                      # tkinter widgets (the only toolkit-aware layer)
@@ -259,7 +260,7 @@ Two humans can play the same game with one client each:
 
 ```powershell
 # Player 1
-python src/scripts/play_game.py 3383d4f3-7d61-4799-88d5-d2592d80d7b6 --side black
+python src/scripts/play_game.py 7438fb33-d39c-4d07-924f-f19bb97baed2 --side black
 
 # Player 2 (same machine or another machine pointed at the engine host)
 python src/scripts/play_game.py 3383d4f3-7d61-4799-88d5-d2592d80d7b6 --side white
@@ -351,19 +352,25 @@ deduplicated or applied by the rules above.
 | `POST` | `/api/v1/games/{game_id}/moves` | Make a move, body `{"row": 1, "col": 1}` | `200` updated snapshot; `400` illegal move; `404` unknown game |
 | `GET` | `/api/v1/health` | Liveness probe exposed by the engine | `200` |
 
-Snapshot fields (`SavedGame`, board shortened for readability):
+Snapshot fields (`SavedGame` as serialised by the engine, board shortened for
+readability):
 
 ```json
 {
   "game_id": "3383d4f3-7d61-4799-88d5-d2592d80d7b6",
-  "board_size": 15,
-  "rule_variant": "standard",
-  "winner": 4,
-  "current_player": 1,
-  "board": [[0, 0, 0]],
+  "config": { "board_size": 15, "rule_variant": "standard" },
+  "state": {
+    "board": [[0, 0, 0]],
+    "winner": 4,
+    "current_player": 1
+  },
   "moves": [{ "row": 8, "col": 8, "player": 1 }]
 }
 ```
+
+The response wraps the board and the turn/outcome in `config` and `state`
+objects, matching the engine's `SavedGame` dataclass; `GameSnapshot.from_dict`
+decodes exactly this shape.
 
 ### Redis pub/sub
 
@@ -468,9 +475,9 @@ side.
 
 ## Status
 
-Scaffold only: directory layout, packaging, README and design document. The GUI
-toolkit question is settled — Tkinter, see
-[GUI Toolkit Selection](#gui-toolkit-selection) — so the board view can be
-written as `tkinter` widgets. The remaining steps are the wire-format models,
-the engine API client, the Redis move event subscriber, the client game state
-and controller, the board view, and the tests.
+Implemented: wire-format models, the engine REST client, the Redis move event
+subscriber with reconnect backoff, the client game state and controller, the
+Tkinter board view and window, and the entry script. Automated tests are not
+included yet; the testing strategy in
+[architecture/design.md](architecture/design.md) still describes the suite the
+project intends to have.
