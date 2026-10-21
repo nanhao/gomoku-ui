@@ -66,11 +66,104 @@ legality and win detection belong to `gomoku-engine` (which delegates them to
 - `redis-py` 5.x — pub/sub subscription, pinned below 6 for the same reason as
   the engine (redis-py 6+ requires Redis ≥ 6.0, while Redis-on-Windows ships
   3.0.x)
-- GUI toolkit — **not selected yet**. A dedicated research step will compare
-  candidates (for example Tkinter, PySide6, Pygame). The toolkit is isolated
-  behind `gomoku_ui/ui`, so models, services and game state stay
-  toolkit-agnostic.
+- GUI toolkit — **Tkinter** (`tkinter` + `tkinter.ttk`, part of the standard
+  library), selected after the comparison in
+  [GUI Toolkit Selection](#gui-toolkit-selection). It adds no install step, its
+  `Canvas` covers the board, and its one weakness (high-DPI) is handled inside
+  `gomoku_ui/ui`. The toolkit stays isolated there, so models, services and game
+  state remain toolkit-agnostic.
 - `pytest` — tests
+
+## GUI Toolkit Selection
+
+The toolkit was the last open decision of the scaffold. Candidates were judged
+against the constraints in [architecture/design.md](architecture/design.md):
+a Windows desktop window, one board canvas with click hit-testing, readable at
+125–200% display scaling, polling driven from the UI thread, no new build
+toolchain, and everything outside `gomoku_ui/ui` staying toolkit-agnostic.
+
+Versions evaluated in October 2026:
+
+| Criterion | `tkinter` + `ttk` | PySide6 6.12 | pygame-ce 2.5.8 |
+| --- | --- | --- | --- |
+| Install footprint | none — bundled with CPython | several hundred MB of wheels | ~30 MB wheel |
+| Board drawing | `Canvas` lines and ovals, no anti-aliasing | `QPainter` / `QGraphicsScene`, anti-aliased | SDL surfaces, AA only via `gfxdraw` |
+| Click → `(row, col)` | own arithmetic on canvas pixels | built in (`itemAt`) | own arithmetic |
+| High DPI | Tk 8.6 is DPI-blind until the process opts in | native per-monitor handling | handled by SDL2 |
+| Widgets | `ttk` status line, buttons, message boxes | full Qt widget set | none — draw everything |
+| UI-thread polling | `root.after()` | `QTimer` | an explicit game-loop tick |
+| UI tests | awkward, but board logic stays outside the widget | `pytest-qt` + `QTest` | weakest of the three |
+| Packaging | small; Tcl/Tk licence is BSD-style | large; LGPLv3 obligations | medium; LGPL 2.1 |
+| Main risk | dated look, aliased strokes | heavy dependency for one window | rebuilding a widget toolkit |
+
+**Decision: `tkinter` with `tkinter.ttk`.**
+
+- This client needs a canvas, a status line and two dialogs. Tk provides all
+  three without a dependency, so `pip install -e .` stays at two libraries
+  (`httpx`, `redis`) and a frozen build stays small.
+- The hard part of this project is not widget chrome: it is the two-channel
+  reconciliation described below, and that code is toolkit-agnostic by design.
+  A heavier toolkit would not remove any of it.
+- Canvas item coordinates are window pixels relative to the widget, so
+  "click → 1-based `(row, col)`" is arithmetic over a cell size and an origin.
+  It stays a pure function that is tested without opening a window.
+- Tk's single real weakness on Windows is display scaling, and it has a
+  contained fix (next subsection).
+
+### High-DPI handling
+
+Tk 8.6 — the Tk bundled with Python 3.11 to 3.13, and confirmed locally on
+Python 3.13.3 — does not declare DPI awareness, so Windows bitmap-stretches the
+whole window at 125–200% scaling. The board view therefore:
+
+- requests per-monitor DPI awareness before `tkinter.Tk()` exists (after that
+  point the process setting is locked), falling back to the older system-wide
+  call when the newer API is unavailable;
+- reads the resulting scale once and derives everything from it: cell size,
+  stone radius, line width, fonts and the initial window geometry — no widget
+  hard-codes a pixel size;
+- redraws on `<Configure>`, so a resize or a move to another monitor keeps the
+  geometry consistent.
+
+Python 3.14 moved the Windows builds to Tcl/Tk 9.0, which improves DPI support,
+but tkinter regressions are still being reported against it (for example a
+missing `TkDefaultFont` on 3.14.7). The client uses no Tk 9 feature, so the
+workaround above is applied on every version.
+
+Grid lines are horizontal and vertical, so the lack of anti-aliasing does not
+show on them; stones are the only place where it does. If that matters, stones
+can be drawn from pre-rendered anti-aliased PNGs through `PhotoImage` instead of
+`create_oval`, with no change outside the view.
+
+### Rejected alternatives
+
+- **PySide6 6.12** — the best rendering and DPI story of the three, but several
+  hundred megabytes and an LGPLv3 relink obligation for a window that contains
+  one grid. Revisit if the client grows a move list, animations or theming;
+  `GameView` and the controller's queue polling are all that would change.
+- **pygame-ce 2.5.8** — the right tool for a sprite-and-animation game, wrong
+  for a form-shaped client: status line, buttons, dialogs and text layout would
+  all be hand-rolled, and UI testing gets harder. Revisit if the board becomes
+  animated or sound-driven.
+- **PyQt6** — the same Qt 6 API under GPL/commercial licensing, so it adds
+  nothing over PySide6 here.
+- **ttkbootstrap / customtkinter** — restyle `ttk` but fix neither canvas
+  anti-aliasing nor DPI, and turn a standard-library toolkit into a dependency.
+
+### Where the toolkit appears
+
+Only `gomoku_ui/ui` imports `tkinter`:
+
+- `DpiScaler` (`ui/dpi_scaler.py`) — declares DPI awareness before the root
+  window exists and exposes the scale factor the other widgets multiply by.
+- `BoardView` (`ui/board_view.py`) — the canvas: grid, stones, last-move marker,
+  hover preview and click mapping.
+- `MainWindow` (`ui/main_window.py`) — `ttk` frame layout, status line, side and
+  move count, error banner, refresh action.
+
+The controller keeps draining its queues on a `root.after(...)` tick, so the
+threading model in the design document is unchanged. `pyproject.toml` needs no
+new dependency: `tkinter` ships with CPython.
 
 ## Directory Layout
 
@@ -102,7 +195,10 @@ gomoku-ui/
 │   │   │   ├── client_game.py       # board + side + event reconciliation
 │   │   │   ├── game_view.py         # abstract boundary the controller drives
 │   │   │   └── game_controller.py   # orchestrates API, subscriber and view
-│   │   └── ui/                      # toolkit-specific widgets (TBD)
+│   │   └── ui/                      # tkinter widgets (the only toolkit-aware layer)
+│   │       ├── dpi_scaler.py        # per-monitor DPI awareness + scale factor
+│   │       ├── board_view.py        # canvas: grid, stones, click mapping
+│   │       └── main_window.py       # frame layout, status line, dialogs
 │   └── scripts/
 │       └── play_game.py             # entry point
 └── tests/
@@ -145,6 +241,10 @@ pip install -e ".[dev]"
 The client package must be installed (editable is enough) because the entry
 script imports `gomoku_ui`. Activating the venv first ensures `python` resolves
 to the project interpreter.
+
+Use the python.org installer for the interpreter: it bundles Tkinter and
+Tcl/Tk. The Microsoft Store build and some minimal distributions ship without
+`_tkinter`, and the window cannot open on those.
 
 ## Usage
 
@@ -344,6 +444,10 @@ side.
   module, file named after the snake_case class name, entry scripts exempt; no
   global functions or variables; dataclasses for structured data; full type
   annotations; rich docstrings; no file above 500 lines; no duplicated logic.
+- **UI code.** Only `gomoku_ui/ui` may import `tkinter`. Board geometry (cell
+  size, origin, pixel-to-cell conversion) is computed in the view from the DPI
+  scale and handed to the controller as a 1-based `(row, col)`; nothing outside
+  `ui` knows about pixels.
 - **Tests.** Run `python -m pytest`. Tests use fake engine/subscriber boundaries
   (no live Redis or engine needed) and must not touch real game data.
 - **Design.** See [architecture/design.md](architecture/design.md) for the
@@ -364,7 +468,9 @@ side.
 
 ## Status
 
-Scaffold only: directory layout, packaging, README and design document. The next
-steps are the wire-format models, the engine API client, the Redis move event
-subscriber, the client game state and controller, the GUI toolkit research and
-board view, and the tests.
+Scaffold only: directory layout, packaging, README and design document. The GUI
+toolkit question is settled — Tkinter, see
+[GUI Toolkit Selection](#gui-toolkit-selection) — so the board view can be
+written as `tkinter` widgets. The remaining steps are the wire-format models,
+the engine API client, the Redis move event subscriber, the client game state
+and controller, the board view, and the tests.
